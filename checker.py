@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 
 import database
+import notifier
 from templates import detect_niche, build_message
 
 log = logging.getLogger(__name__)
@@ -135,16 +136,18 @@ async def check_channel(username: str) -> dict | None:
 async def checker_loop(notify_queue: asyncio.Queue):
     log.info('checker_loop started')
     while True:
+        if notifier._paused:
+            await asyncio.sleep(15)
+            continue
         row = await database.get_next_from_queue()
         if not row:
             await asyncio.sleep(15)
             continue
 
         username, query = row
+        result = await check_channel(username)
         await database.mark_seen(username)
         await database.mark_checked(username)
-
-        result = await check_channel(username)
         if result:
             await database.save_lead(
                 result['username'], result['niche'],

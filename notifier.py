@@ -1,5 +1,3 @@
-"""Шлёт лиды в Telegram и принимает нажатия кнопок."""
-
 import asyncio
 import logging
 import os
@@ -23,7 +21,7 @@ MY_CHAT_ID = int(os.getenv('MY_CHAT_ID', '0'))
 bot = Bot(BOT_TOKEN)
 dp  = Dispatcher()
 
-# Ограничение: не более 10 уведомлений в час
+_paused = False
 _sent_times: deque = deque(maxlen=10)
 MAX_PER_HOUR = 10
 
@@ -36,20 +34,13 @@ def _can_send() -> bool:
 
 
 def _lead_kb(username: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text='✅ Написал',   callback_data=f'lead_wrote_{username}'),
-            InlineKeyboardButton(text='⏭ Пропустить', callback_data=f'lead_skip_{username}'),
-        ]
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='✅ Написал',    callback_data=f'lead_wrote_{username}'),
+        InlineKeyboardButton(text='⏭ Пропустить', callback_data=f'lead_skip_{username}'),
+    ]])
 
 
 async def send_lead(lead: dict):
-    if not _can_send():
-        log.info('Лимит 10/час достигнут — жду...')
-        await asyncio.sleep(300)
-        return
-
     username = lead['username']
     text = (
         f'🎯 *Новый лид: @{username}*\n\n'
@@ -60,7 +51,6 @@ async def send_lead(lead: dict):
         f'*📝 Сообщение:*\n'
         f'```\n{lead["message"]}\n```'
     )
-
     await bot.send_message(
         MY_CHAT_ID, text,
         parse_mode='Markdown',
@@ -69,6 +59,22 @@ async def send_lead(lead: dict):
     )
     _sent_times.append(datetime.now().timestamp())
     await stats_module.increment_notified()
+
+
+async def notifier_loop(notify_queue: asyncio.Queue):
+    log.info('notifier_loop started')
+    while True:
+        lead = await notify_queue.get()
+        if not _can_send():
+            log.info('Лимит 10/час — кладу лид обратно, жду 5 мин')
+            await notify_queue.put(lead)
+            await asyncio.sleep(300)
+            continue
+        try:
+            await send_lead(lead)
+        except Exception as e:
+            log.error(f'send_lead @{lead["username"]}: {e}')
+        await asyncio.sleep(5)
 
 
 @dp.callback_query(F.data.startswith('lead_'))
@@ -88,6 +94,20 @@ async def handle_lead_action(callback: CallbackQuery):
         pass
 
 
+@dp.message(F.chat.id == MY_CHAT_ID, F.text == '/pause')
+async def cmd_pause(message: Message):
+    global _paused
+    _paused = True
+    await message.answer('⏸ Лидген на паузе. /resume для продолжения.')
+
+
+@dp.message(F.chat.id == MY_CHAT_ID, F.text == '/resume')
+async def cmd_resume(message: Message):
+    global _paused
+    _paused = False
+    await message.answer('▶️ Лидген возобновлён.')
+
+
 @dp.message(F.chat.id == MY_CHAT_ID, F.text == '/stats')
 async def cmd_stats(message: Message):
     await message.answer(await stats_module.summary(), parse_mode='Markdown')
@@ -96,18 +116,7 @@ async def cmd_stats(message: Message):
 @dp.message(F.chat.id == MY_CHAT_ID, F.text == '/queue')
 async def cmd_queue(message: Message):
     size = await database.queue_size()
-    await message.answer(f'📋 В очереди на проверку: *{size}* каналов', parse_mode='Markdown')
-
-
-async def notifier_loop(notify_queue: asyncio.Queue):
-    log.info('notifier_loop started')
-    while True:
-        lead = await notify_queue.get()
-        try:
-            await send_lead(lead)
-        except Exception as e:
-            log.error(f'send_lead @{lead["username"]}: {e}')
-        await asyncio.sleep(5)
+    await message.answer(f'📋 В очереди: *{size}* каналов', parse_mode='Markdown')
 
 
 async def bot_polling():

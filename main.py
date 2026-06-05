@@ -1,11 +1,12 @@
 """
 Lead Finder — система поиска лидов в Telegram.
-Три параллельных воркера: finder → checker → notifier.
+Воркеры: finder → checker → notifier + daily_summary.
 """
 
 import asyncio
 import logging
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +22,17 @@ import database
 from finder   import finder_loop
 from checker  import checker_loop
 from notifier import notifier_loop, bot_polling, bot, MY_CHAT_ID
+from stats    import summary
+
+
+async def daily_summary_loop():
+    sent_day = -1
+    while True:
+        now = datetime.now()
+        if now.hour == 20 and now.minute < 3 and sent_day != now.day:
+            sent_day = now.day
+            await bot.send_message(MY_CHAT_ID, await summary(), parse_mode='Markdown')
+        await asyncio.sleep(60)
 
 
 async def main():
@@ -35,7 +47,9 @@ async def main():
         'Ищу Telegram-каналы малого бизнеса без бота.\n\n'
         'Команды:\n'
         '/stats — статистика\n'
-        '/queue — очередь на проверку',
+        '/queue — очередь\n'
+        '/pause — пауза\n'
+        '/resume — продолжить',
         parse_mode='Markdown'
     )
 
@@ -44,6 +58,7 @@ async def main():
         checker_loop(notify_queue),
         notifier_loop(notify_queue),
         bot_polling(),
+        daily_summary_loop(),
     )
 
 
