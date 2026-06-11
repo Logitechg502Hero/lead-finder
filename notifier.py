@@ -119,6 +119,43 @@ async def cmd_queue(message: Message):
     await message.answer(f'📋 В очереди: *{size}* каналов', parse_mode='Markdown')
 
 
+@dp.message(F.chat.id == MY_CHAT_ID, F.text == '/ping')
+async def cmd_ping(message: Message):
+    size = await database.queue_size()
+    sent_last_hour = len(_sent_times)
+    await message.answer(
+        f'✅ Бот жив\n'
+        f'В очереди на проверку: {size}\n'
+        f'Отправлено лидов за час: {sent_last_hour}/{MAX_PER_HOUR}\n'
+        f'Пауза: {"да" if _paused else "нет"}'
+    )
+
+
+@dp.message(F.chat.id == MY_CHAT_ID, F.text == '/test')
+async def cmd_test(message: Message):
+    # Берёт следующий канал из очереди, прогоняет через реальную проверку
+    # и показывает результат — доказательство, что пайплайн жив.
+    import checker
+    row = await database.get_next_from_queue()
+    if not row:
+        await message.answer('Очередь пуста — finder ещё не наполнил её. Подожди 2-5 мин и повтори /test.')
+        return
+    username, query = row
+    await message.answer(f'🔎 Проверяю @{username} (по запросу «{query}»)…')
+    result = await checker.check_channel(username)
+    await database.mark_seen(username)
+    await database.mark_checked(username)
+    if result:
+        await send_lead(result)
+        await message.answer('✅ Канал прошёл фильтры — карточка лида выше. Пайплайн работает.')
+    else:
+        await message.answer(
+            f'@{username} не прошёл фильтры (подписчиков <200 или >50k, '
+            f'последний пост >14 дней назад, или в описании есть бот).\n'
+            f'Это нормально — жми /test ещё раз, проверю следующий.'
+        )
+
+
 async def bot_polling():
     dp.callback_query.middleware(CallbackAnswerMiddleware())
     await dp.start_polling(bot, allowed_updates=['callback_query', 'message'])
