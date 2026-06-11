@@ -26,10 +26,12 @@ MIN_SUBSCRIBERS = 200
 MAX_SUBSCRIBERS = 50_000
 MAX_POST_AGE_DAYS = 14
 
-BOT_SIGNALS = [
-    '_bot', 'бот', 'bot', 'запись через', 'записаться →', 'онлайн-запись',
-    'записаться 👇', 'нажми', 'кнопка', '/start',
-]
+# Сигналы ищем ТОЛЬКО в bio/описании, не во всём HTML
+# (в HTML t.me всегда есть margin-bottom, font-roboto и т.п. → ложное 'bot')
+BOT_SIGNALS_RE = re.compile(
+    r'(@\w*bot\b|\bбот\b|онлайн[- ]запись|запись через бот|/start|t\.me/\w+bot)',
+    re.IGNORECASE
+)
 
 NIGHT_START = 0
 NIGHT_END   = 8
@@ -44,14 +46,26 @@ def make_session() -> aiohttp.ClientSession:
 
 
 def _parse_subscribers(html: str) -> int:
-    # <div class="tgme_page_extra">1 234 subscribers</div>
-    m = re.search(r'([\d\s]+)\s*(?:subscriber|подписчик)', html, re.IGNORECASE)
-    if m:
-        try:
-            return int(m.group(1).replace(' ', '').replace('\xa0', ''))
-        except Exception:
-            pass
-    return 0
+    # <span class="counter_value">82K</span> <span class="counter_type">subscribers</span>
+    m = re.search(
+        r'counter_value">([^<]+)</span>\s*<span class="counter_type">\s*(?:subscriber|подписчик)',
+        html, re.IGNORECASE
+    )
+    if not m:
+        # запасной вариант: «1 234 subscribers» прямым текстом
+        m = re.search(r'([\d.,\sKMkmкКмМ]+?)\s*(?:subscriber|подписчик)', html, re.IGNORECASE)
+        if not m:
+            return 0
+    raw = m.group(1).strip().replace(' ', '').replace('\xa0', '').replace(',', '.')
+    mult = 1
+    if raw[-1:] in 'KkкК':
+        mult, raw = 1_000, raw[:-1]
+    elif raw[-1:] in 'MmмМ':
+        mult, raw = 1_000_000, raw[:-1]
+    try:
+        return int(float(raw) * mult)
+    except Exception:
+        return 0
 
 
 def _parse_last_post_date(html: str) -> datetime | None:
@@ -70,8 +84,8 @@ def _parse_last_post_date(html: str) -> datetime | None:
 
 
 def _has_bot(html: str, bio: str) -> bool:
-    combined = (html + ' ' + bio).lower()
-    return any(sig in combined for sig in BOT_SIGNALS)
+    # Только bio — в полном HTML 'bot' матчит margin-bottom/roboto (ложные срабатывания)
+    return BOT_SIGNALS_RE.search(bio) is not None
 
 
 def _parse_name(html: str) -> str:
@@ -98,14 +112,14 @@ async def check_channel(username: str) -> dict | None:
 
     subscribers = _parse_subscribers(html)
     if not (MIN_SUBSCRIBERS <= subscribers <= MAX_SUBSCRIBERS):
-        log.debug(f'@{username}: {subscribers} подписчиков — пропуск')
+        log.info(f'@{username}: {subscribers} подписчиков — пропуск')
         return None
 
     last_post = _parse_last_post_date(html)
     if last_post:
         age_days = (datetime.now() - last_post).days
         if age_days > MAX_POST_AGE_DAYS:
-            log.debug(f'@{username}: последний пост {age_days}д назад — пропуск')
+            log.info(f'@{username}: последний пост {age_days}д назад — пропуск')
             return None
         last_post_str = f'{age_days}д назад' if age_days > 0 else 'сегодня'
     else:
@@ -116,7 +130,7 @@ async def check_channel(username: str) -> dict | None:
     bio = re.sub(r'<[^>]+>', ' ', bio_m.group(1)).strip() if bio_m else ''
 
     if _has_bot(html, bio):
-        log.debug(f'@{username}: бот уже есть — пропуск')
+        log.info(f'@{username}: бот уже есть — пропуск')
         return None
 
     name = _parse_name(html)
